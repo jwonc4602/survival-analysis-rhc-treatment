@@ -1,0 +1,528 @@
+---
+format: pdf
+---
+
+# Q1.
+
+## Loading Data
+```{r}
+#| warning: false
+#| message: false
+# 1. Read in the full dataset
+rhc <- read.csv("data/rhc.csv")
+
+# 2. Load dplyr (for select, mutate, etc.)
+library(dplyr)
+
+# 3. Restrict to the 10 relevant variables (1 outcome, 1 treatment, 8 covariates)
+df <- rhc %>%
+  select(
+    t3d30,             # outcome (time to death within 30 days)
+    swang1,            # treatment indicator (0 = no RHC, 1 = RHC within 24 hrs)
+    age, sex, wtkilo1, temp1, gastr, cardiohx, dementhx, hema
+  )
+
+```
+
+# (a)
+The goal is to check which covariates are significantly different between the treated group (swang1 = "RHC") and the control group (swang1 = "No RHC").
+
+For continuous variables like age, wtkilo1, and temp1, we can use a two-sample t-test. If the data are not normally distributed, we can use a nonparametric test instead.
+
+For categorical variables like sex, gastr, cardiohx, dementhx, and hema, we can use a chi-square test. If expected cell counts are low, we can use Fisher’s exact test.
+
+```{r}
+#| warning: false
+#| message: false
+# Split data by treatment group
+df_treated  <- subset(df, swang1 == "RHC")
+df_control  <- subset(df, swang1 == "No RHC")
+
+# 1) Continuous variables: difference in means
+continuous_vars <- c("age", "wtkilo1", "temp1")
+
+# Compare means for continuous variables
+for (var in continuous_vars) {
+  test_result <- t.test(df_treated[[var]], df_control[[var]])
+  
+  treated_mean <- mean(df_treated[[var]], na.rm = TRUE)
+  control_mean <- mean(df_control[[var]], na.rm = TRUE)
+  p_val <- test_result$p.value
+  
+  cat(paste0("Checking variable: ", var, "\n"))
+  cat(paste0("  Mean (RHC) = ", round(treated_mean, 2), 
+             ", Mean (No RHC) = ", round(control_mean, 2), "\n"))
+  cat(paste0("  p-value = ", signif(p_val, 4), "\n\n"))
+}
+
+# 2) Categorical variables: difference in proportions
+categorical_vars <- c("sex", "gastr", "cardiohx", "dementhx", "hema")
+
+for (var in categorical_vars) {
+  tab <- table(df[[var]], df$swang1)
+  chi <- chisq.test(tab)
+  cat("Variable:", var, "\n")
+  print(tab)
+  cat("  p-value from Chi-square test =", chi$p.value, "\n\n")
+}
+```
+
+Ran separate statistical tests (t-tests for continuous variables, chi-square for categorical) comparing treated vs. control units. Here are the results with corresponding p-values:
+
+1. age 
+   - Treated mean = 60.75, Control mean = 61.76  
+   - *p* = 0.0224  
+   - This difference is statistically significant at a 5% level.
+
+2. wtkilo1 (weight)  
+   - Treated mean = 72.36, Control mean = 65.04  
+   - *p* ≈ 4.16 × 10^(-21)  
+   - This difference is highly significant.
+
+3. temp1 (temperature)  
+   - Treated mean = 37.59, Control mean = 37.63  
+   - *p* = 0.4346  
+   - No significant difference in temperature between groups.
+
+4. sex
+   - *p* = 0.0006999  
+   - The distribution of sex (female/male) differs significantly between treated and control groups.
+
+5. gastr (gastrointestinal diagnosis)  
+   - *p* ≈ 8.19 × 10^(-6)  
+   - Proportions differ significantly between groups.
+
+6. cardiohx (history of cardiovascular disease)  
+   - *p* ≈ 2.05 × 10^(-5)  
+   - Proportions differ significantly between groups.
+
+7. dementhx (dementia, stroke, etc.)  
+   - *p* ≈ 7.51 × 10^(-9)  
+   - Proportions differ significantly between groups.
+
+8. hema (hematologic diagnosis)  
+   - *p* = 0.0291  
+   - Proportions differ significantly, albeit less strongly than some other variables.
+
+## Conclusion
+
+- The only variable that does not show a statistically significant difference between RHC (“treated”) and No RHC (“control”) is temperature (`temp1`), with a *p* = 0.4346.
+- All other covariates (age, wtkilo1, sex, gastr, cardiohx, dementhx, hema) appear to be imbalanced between the two groups at the 5% significance level. 
+
+\newpage
+
+# (b)
+
+```{r}
+#| warning: false
+#| message: false
+# 1. Estimate Propensity Scores
+df$swang1 <- factor(df$swang1, levels = c("No RHC", "RHC"))
+
+# Then run logistic regression:
+ps_model <- glm(
+  swang1 ~ age + sex + wtkilo1 + temp1 + gastr + cardiohx + dementhx + hema,
+  data = df,
+  family = binomial
+)
+summary(ps_model)
+
+
+# Create a new column in df with the fitted propensity scores
+df$pscore <- ps_model$fitted.values
+
+# 2. Split Data into Treated and Control
+
+df_treated <- subset(df, swang1 == "RHC")
+df_control <- subset(df, swang1 == "No RHC")
+
+# 3. Match Each Treated to Its Closest Control
+matched_pairs <- data.frame(
+  t3d30_treated = numeric(0),
+  t3d30_control = numeric(0)
+)
+
+for (i in seq_len(nrow(df_treated))) {
+  # Propensity score for the i-th treated unit
+  pscore_i <- df_treated$pscore[i]
+  
+  # Calculate the absolute distance to every control's PS
+  distances <- abs(df_control$pscore - pscore_i)
+  
+  # Find the index of the control with the smallest distance
+  min_index <- which.min(distances)
+  
+  # Store the outcome pair in a data frame
+  matched_pairs <- rbind(
+    matched_pairs,
+    data.frame(
+      t3d30_treated = df_treated$t3d30[i],
+      t3d30_control = df_control$t3d30[min_index]
+    )
+  )
+}
+
+# Inspect the first few matched pairs:
+head(matched_pairs)
+```
+
+```{r}
+#| warning: false
+#| message: false
+# 4. Estimate the Treatment Effect from Matched Data
+
+# (a) Mean Difference (ATT)
+mean_diff <- mean(matched_pairs$t3d30_treated - matched_pairs$t3d30_control)
+mean_diff
+
+# (b) Confidence Interval via Paired t‐Test
+paired_test <- t.test(
+  matched_pairs$t3d30_treated,
+  matched_pairs$t3d30_control,
+  paired = TRUE
+)
+
+paired_test
+```
+
+```{r}
+#| warning: false
+#| message: false
+# 5. Interpretation
+paired_test$estimate
+paired_test$conf.int
+paired_test$p.value
+```
+
+1. Propensity Score Model
+- I fit a logistic regression to estimate each patient’s probability (propensity score) of receiving RHC (`swang1`). The model included the covariates:  
+
+$$
+  \text{swang1} \sim \text{age} + \text{sex} + \text{wtkilo1} + \text{temp1} + \text{gastr} + \text{cardiohx} + \text{dementhx} + \text{hema}
+$$
+
+From the summary, several covariates (e.g., `wtkilo1`, `gastr`, `cardiohx`, `dementhx`, `hema`) are statistically significant predictors of receiving RHC.
+
+2. Nearest‐Neighbor Matching  
+   - Splitted the dataset into treated (`swang1="RHC"`) and control (`swang1="No RHC"`).  
+   - For each treated unit, found the single control whose propensity score was closest in absolute distance.  
+   - This produced a matched pairs dataset, with each row containing $(t3d30_{\text{treated}}, t3d30_{\text{control}})$.
+
+3. Estimated Treatment Effect  
+   - The mean difference in $t3d30$ (treated minus control) was approximately -1.893 days.  
+   - A paired t‐test yielded a 95% CI of about [-2.48, -1.30] and a *p*‐value near $4.0 \times 10^{-10}$.  
+   - Because the estimate is negative and the confidence interval lies entirely below zero, the RHC group, on average, experienced ~1.89 fewer days of survival within 30 days than matched controls. The result is statistically significant at any conventional level.
+
+4. Interpretation  
+After matching on baseline covariates (via propensity scores), the estimated effect of RHC on 30‐day survival time is about -1.89 days. In other words, among comparable patients (same propensity to receive RHC), those who actually received RHC lived nearly 2 days fewer on average than matched controls. The confidence interval (-2.48 to -1.30) does not include zero, suggesting a significant negative association between RHC and 30‐day survival time in this observational sample.
+
+\newpage
+
+# (c)
+```{r}
+#| warning: false
+#| message: false
+# In the original dataset
+mean_treated  <- mean(df_treated$t3d30, na.rm = TRUE)
+mean_control  <- mean(df_control$t3d30, na.rm = TRUE)
+diff_unadjusted <- mean_treated - mean_control
+
+ttest_unadj <- t.test(df_treated$t3d30, df_control$t3d30)
+
+cat("No-adjustment estimate of treatment effect =", diff_unadjusted, "\n")
+cat("95% CI:", ttest_unadj$conf.int[1], "to", ttest_unadj$conf.int[2], "\n")
+cat("p-value:", ttest_unadj$p.value, "\n")
+```
+
+Unadjusted Estimate (Raw Difference):
+- Point estimate: -1.52 days  
+- 95% CI: $[-2.06,\,-0.98] $ 
+- p‐value: $4.50 \times 10^{-8}$
+
+Matching Estimate (from part b):  
+- Point estimate: -1.89 days  
+- 95% CI: $[-2.48,\,-1.30\bigr]$  
+- p‐value: $4.0 \times 10^{-10}$ (approx.)
+
+## Interpretation
+
+- Direction: Both analyses indicate that the RHC group, on average, survives fewer days (negative difference) than the control group.  
+- Magnitude: The matched estimate (-1.89 days) is larger in magnitude (more negative) than the unadjusted estimate (-1.52 days).  
+- Reason: Ignoring covariate imbalances can distort the apparent effect. Once we match on propensity scores to achieve greater comparability between groups, the negative effect of RHC on survival appears somewhat stronger.  
+- Conclusion: Both methods suggest a statistically significant negative association, but the matching analysis is less biased (assuming no unmeasured confounders) and is therefore likely more reliable in estimating the true effect.
+
+\newpage
+
+# (d)
+
+```{r}
+#| warning: false
+#| message: false
+# 1. Estimate Propensity Scores (already done previously)
+# Make sure swang1 is a factor
+df$swang1 <- factor(df$swang1, levels = c("No RHC", "RHC"))
+ps_model <- glm(
+  swang1 ~ age + sex + wtkilo1 + temp1 + gastr + cardiohx + dementhx + hema,
+  data = df,
+  family = binomial
+)
+df$pscore <- ps_model$fitted.values
+
+# 2. Stratify by quintiles of the propensity score
+quintiles <- quantile(df$pscore, probs = seq(0, 1, 0.2), na.rm = TRUE)
+df$stratum <- cut(df$pscore, breaks = quintiles, include.lowest = TRUE, labels = FALSE)
+
+# 3. Calculate mean outcome and count within each stratum × treatment group
+library(dplyr)
+library(tidyr)
+
+strat_effects <- df %>%
+  group_by(stratum, swang1) %>%
+  summarise(
+    mean_outcome = mean(t3d30, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(
+    id_cols = stratum,
+    names_from = swang1,
+    values_from = c(mean_outcome, n),
+    names_sep = "_"
+  ) %>%
+  mutate(
+    # Difference in survival days: treated (RHC) - control (No RHC)
+    diff_stratum = `mean_outcome_RHC` - `mean_outcome_No RHC`,
+    
+    # Weight: proportion of total observations in this stratum
+    weight = (`n_RHC` + `n_No RHC`) / nrow(df)
+  )
+
+# 4. Compute weighted average of stratum-specific differences
+strat_te <- sum(strat_effects$diff_stratum * strat_effects$weight)
+
+# 5. Output the results
+print(strat_effects)
+cat("\nStratification estimate of treatment effect (weighted average):", strat_te, "days\n")
+```
+
+```{r}
+#| warning: false
+#| message: false
+# Set number of bootstrap samples
+B <- 1000
+set.seed(123)
+
+# Store bootstrap estimates
+bootstrap_ests <- numeric(B)
+
+for (b in 1:B) {
+  # Sample with replacement
+  df_boot <- df[sample(1:nrow(df), replace = TRUE), ]
+  
+  # Re-stratify based on same quintiles
+  df_boot$stratum <- cut(df_boot$pscore, breaks = quintiles, include.lowest = TRUE, labels = FALSE)
+  
+  # Estimate stratum effects again
+  strat_b <- df_boot %>%
+    group_by(stratum, swang1) %>%
+    summarise(
+      mean_outcome = mean(t3d30, na.rm = TRUE),
+      n = n(),
+      .groups = "drop"
+    ) %>%
+    pivot_wider(
+      id_cols = stratum,
+      names_from = swang1,
+      values_from = c(mean_outcome, n),
+      names_sep = "_"
+    ) %>%
+    mutate(
+      diff_stratum = `mean_outcome_RHC` - `mean_outcome_No RHC`,
+      weight = (`n_RHC` + `n_No RHC`) / nrow(df_boot)
+    )
+  
+  # Compute bootstrap treatment effect for this sample
+  strat_te_b <- sum(strat_b$diff_stratum * strat_b$weight, na.rm = TRUE)
+  
+  # Store
+  bootstrap_ests[b] <- strat_te_b
+}
+
+# Original point estimate
+point_est <- strat_te  # from earlier
+
+# Compute 95% CI (percentile method)
+ci_lower <- quantile(bootstrap_ests, 0.025)
+ci_upper <- quantile(bootstrap_ests, 0.975)
+
+# Calculate 2-sided p-value based on bootstrap null
+# This assumes the null hypothesis H0: ATE = 0
+p_value <- 2 * min(
+  mean(bootstrap_ests <= 0),
+  mean(bootstrap_ests >= 0)
+)
+
+# Output
+cat("Bootstrap 95% CI: [", ci_lower, ",", ci_upper, "]\n")
+cat("Bootstrap p-value:", p_value, "\n")
+```
+
+Based on stratification over quintiles of the estimated propensity score, the average treatment effect of RHC on 30-day survival time is estimated to be approximately –1.62 days. This means that patients receiving RHC survive, on average, about 1.6 days fewer than comparable patients not receiving RHC, after adjusting for covariate imbalance via subclassification.
+
+Also, based on 1,000 bootstrap replications, the 95% confidence interval for the stratification estimate is 
+$[−2.25,−0.97]$. Since this interval does not contain zero and the p-value is well below 0.05, we conclude that the negative effect of RHC on 30-day survival is statistically significant under the stratification method as well.
+
+\newpage
+# (e)
+
+```{r}
+#| warning: false
+#| message: false
+# Make sure swang1 is a factor with "No RHC" as reference (already done earlier)
+df$swang1 <- factor(df$swang1, levels = c("No RHC", "RHC"))
+
+# Fit linear regression model
+reg_model <- lm(
+  t3d30 ~ swang1 + age + sex + wtkilo1 + temp1 + gastr + cardiohx + dementhx + hema,
+  data = df
+)
+
+# View model summary
+summary(reg_model)
+
+# Extract treatment coefficient and 95% CI
+library(broom)
+
+reg_results <- tidy(reg_model, conf.int = TRUE)
+reg_results_treat <- reg_results[reg_results$term == "swang1RHC", ]
+
+# Print treatment effect estimate
+cat("Regression-adjusted treatment effect estimate (RHC vs No RHC):\n")
+print(reg_results_treat)
+```
+
+Based on regression adjustment, the estimated effect of RHC on 30-day survival is approximately –1.47 days. This suggests that, after controlling for differences in patient characteristics (age, sex, weight, temperature, and clinical history), patients who received RHC survived on average 1.47 fewer days within the 30-day window compared to those who did not.
+
+The 95% confidence interval $[−1.96, −0.98]$ does not include zero, and the p-value is highly significant, indicating strong evidence of a negative association between RHC and short-term survival in this observational sample.
+
+\newpage
+# (f)
+
+```{r}
+#| warning: false
+#| message: false
+# Updated estimates with bootstrap CI for stratification
+results <- data.frame(
+  Method = c("Unadjusted", "Matching", "Stratification", "Regression Adjustment"),
+  Estimate = c(-1.52, -1.89, -1.62, -1.47),
+  CI_Lower = c(-2.06, -2.48, -2.25, -1.96),
+  CI_Upper = c(-0.98, -1.30, -0.97, -0.98),
+  p_value  = c(4.50e-08, 4.05e-10, 0.0008, 0.00001)
+)
+
+library(knitr)
+kable(results, digits = 3, caption = "Comparison of Treatment Effect Estimates Across Methods (with 95% CI and p-values)")
+```
+
+## Interpretation and Comparison
+All four methods show the same result: patients who received RHC had shorter 30-day survival than those who did not. The unadjusted estimate shows a –1.52 day difference, but this is likely biased due to differences between the treated and control groups.
+
+The matching method shows the largest effect (–1.89 days), likely because it balances the groups better and accounts for more confounding. The stratification method gives an effect of –1.62 days. The bootstrap confidence interval is [–2.25, –0.97] with a p-value of 0.0008, showing a clear and significant negative effect.
+
+The regression adjustment method finds a –1.47 day effect, also statistically significant with a confidence interval that excludes zero. Although the effect size varies by method, all estimates are negative and statistically significant. This suggests that RHC is linked to shorter short-term survival in this dataset.
+
+## Conclusion
+All four methods — unadjusted, matching, stratification, and regression adjustment — show that RHC is associated with lower 30-day survival. The effects range from –1.47 to –1.89 days, and all confidence intervals exclude zero, showing consistent evidence of harm.
+
+However, these are observational results. Unmeasured factors may still affect the estimates, so we cannot be sure RHC causes the lower survival. The results are strong, but causal claims should be made carefully.
+
+\newpage
+# Q2
+
+# (a)
+We are conducting 20 independent two-sample t-tests at a significance level (α) of 0.05, and all null hypotheses are true.
+
+## Distribution
+Each t-test has a 5% chance (α = 0.05) of producing a false positive (Type I error) if the null hypothesis is true. Since the tests are independent, the number of significant results follows a binomial distribution:
+
+$X \sim \text{Binomial}(n = 20, p = 0.05)$
+
+## Expected number of significant results:
+
+$E(X) = n \cdot p = 20 \cdot 0.05 = 1$
+
+## Aswer:  
+- The number of significant tests follows a Binomial(20, 0.05) distribution.  
+- We expect 1 test out of 20 to be significant by chance alone.
+
+# (b)
+
+The R code simulates 1000 experiments, each with 2 independent t-tests, and checks if at least one p-value is ≤ 0.05.
+
+```{r}
+#| warning: false
+#| message: false
+# Simulate 1000 experiments, each with 20 independent t-tests
+rejections <- replicate(1000, {
+  pvals <- replicate(20, t.test(rnorm(100), rnorm(100))$p.value)
+  any(pvals <= 0.05)  # Check if any null is rejected
+})
+mean(rejections)
+```
+
+
+## Interpretation:
+
+- This will give the probability that at least one null hypothesis is rejected across 20 tests.
+- Since all nulls are true, any rejection is a Type I error.
+
+
+# (c)
+
+We want to find the probability of making at least one Type I error among $k$ independent tests at level $\alpha$.
+
+## derivation:
+
+- For one test: $P(\text{No Type I error}) = 1 - \alpha$
+- For $k$ independent tests: $P(\text{No Type I error in all } k \text{ tests}) = (1 - \alpha)^k$
+- So, the probability of at least one Type I error is: $P(\text{At least one } H_0 \text{ rejected}) = 1 - (1 - \alpha)^k$
+
+## Verification for part (b):
+
+Use $\alpha = 0.05$ and $k = 20$:
+
+$$
+P(\text{At least one rejection}) = 1 - (1 - 0.05)^{20} = 1 - 0.95^{20} \approx 1 - 0.3585 \approx 0.6415
+$$
+
+So, the probability is about 64% — i.e., there's a 64% chance of making at least one false discovery when running 20 tests at the 5% level.
+
+This matches what we’d expect from the simulation in (b).
+
+# (d)
+
+We analyze the function:
+
+$P(\text{At least one rejection}) = 1 - (1 - \alpha)^k$
+
+As $k$ increases (more tests), $(1 - \alpha)^k$ gets smaller, so the overall probability increases.
+
+## Conclusion:
+- The experiment-wise error rate increases as $k$ increases (with fixed $\alpha$.
+- When conducting many tests, the chance of making at least one false positive increases dramatically — this is why corrections for multiple testing (e.g., Bonferroni) are often necessary.
+
+## (e)
+- 50 variables were tested for differences between men and women.
+- One of these showed a “significant” result at the 1% level (α = 0.01).
+
+## why there might be a problem
+This is a classic multiple comparisons problem.
+
+- With 50 tests at α = 0.01, the probability of at least one false positive is:
+
+$P(\text{At least one false positive}) = 1 - (1 - 0.01)^{50} \approx 1 - 0.605 = 0.395$
+
+So, there’s a 39.5% chance of getting at least one significant result just by chance
+
+## Interpretation:
+The significant difference could be a false positive, especially since it wasn’t a pre-planned hypothesis but found after testing many variables. This is called data dredging or p-hacking. Researchers should correct for multiple comparisons or pre-register hypotheses to avoid misleading results.
